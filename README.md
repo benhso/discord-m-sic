@@ -1,2 +1,3 @@
-# discord-m-sic
+# discord-music-bot
+
 discordda müzik botu yapmak isteyenlere kod
