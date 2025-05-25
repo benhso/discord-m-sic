@@ -1,0 +1,302 @@
+import discord
+from discord.ext import commands
+import yt_dlp
+import asyncio 
+import datetime
+
+# --- Bot İntentleri ---
+intents = discord.Intents.default()
+intents.message_content = True
+intents.voice_states = True
+
+# --- Bot Tanımlaması ---
+pilot = commands.Bot(command_prefix='!', intents=intents)
+
+intents = discord.Intents.default()
+
+intents.message_content = True
+
+intents.voice_states = True
+
+# --- Şarkı Kuyruğu ve Çalma Durumu Yönetimi ---
+# Her Discord sunucusu (guild) için ayrı bir kuyruk ve oynatma durumu tutacağız.
+# 'guild_id': {'queue': [], 'loop': False, 'current_player': None}
+music_queues = {} 
+
+# --- yt-dlp ve FFmpeg Ayarları ---
+YDL_OPTIONS = {
+    'format': 'bestaudio/best',
+    'noplaylist': True,
+    'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
+    'quiet': True,
+    'nocheckcertificate': True,
+    'ignoreerrors': False,
+    'logtostderr': False,
+    'extractaudio': True,
+    'audioformat': 'mp3',
+    'postprocessors': [{
+        'key': 'FFmpegExtractAudio',
+        'preferredcodec': 'mp3',
+        'preferredquality': '192',
+    }],
+    'default_search': 'auto',
+    'source_address': '0.0.0.0'
+}
+
+FFMPEG_OPTIONS = {
+    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+    'options': '-vn'
+}
+
+# --- Bot Hazır Olduğunda ---
+@pilot.event
+async def on_ready():
+    """Bot Discord'a başarıyla bağlandığında çalışır."""
+    print(f"{pilot.user.name} olarak giriş yaptım!")
+    print("Müzik ve sohbet komutları hazır.")
+    #await pilot.change_presence(activity=discord.Game(name="Müzik Dinliyor !yardım"))
+
+# --- Mesaj İşleme ve Sohbet Komutları (Değişmedi) ---
+@pilot.event
+async def on_message(message):
+    """Gelen mesajları işler ve sohbet yanıtları verir."""
+    if message.author == pilot.user:
+        return
+
+    await pilot.process_commands(message)
+
+    if message.content.lower() == "merhaba":
+        await message.channel.send("Merhaba! Nasılsın?")
+
+    elif message.content.lower() == "iyi sen":
+        await message.channel.send("Hamd Olsun Global Kasıyorum")
+
+    elif message.content.lower() == "saat":
+        now = datetime.datetime.now()
+        await message.channel.send(f"Şu an saat {now.hour:02}:{now.minute:02}.")
+
+    elif message.content.lower() == "SAAT KAÇ":
+        now = datetime.datetime.now()
+        await message.channel.send(f"Şu an saat {now.hour:02}:{now.minute:02}.")
+
+    elif message.content.lower() == "saat kaç":
+        now = datetime.datetime.now()
+        await message.channel.send(f"Şu an saat {now.hour:02}:{now.minute:02}.")
+
+    elif message.content.lower() == "SAAT":
+        now = datetime.datetime.now()
+        await message.channel.send(f"Şu an saat {now.hour:02}:{now.minute:02}.")
+
+
+    elif message.content.lower().startswith("hava durumu"):
+        await message.channel.send("Dışarı Çıkarsam Söylerim ZİNGG.")
+
+    elif message.content.lower().startswith("sen niye dalga geçiyorsun"):
+        await message.channel.send("CS oynarken ciddi konuşamıyorum.")
+
+# --- Yardımcı Fonksiyon: Şarkı Bitince Ne Yapılacak? ---
+def play_next(ctx):
+    """Mevcut şarkı bittiğinde veya atlandığında sıradaki şarkıyı çalmaya çalışır."""
+    guild_id = ctx.guild.id
+    if guild_id not in music_queues:
+        return
+
+    queue_data = music_queues[guild_id]
+    
+    # Döngü açıksa ve çalınan bir şarkı varsa, o şarkıyı tekrar sıraya ekle
+    if queue_data['loop'] and queue_data['current_player']:
+        # 'current_player' bilgisi, şarkı bittiğinde None olur. O yüzden bir yedeğini tutmalıyız.
+        # Bu kısım basit bir döngü için yeterli, daha gelişmiş döngü için şarkı objesi tutulmalı.
+        next_song_info = queue_data['current_player'] 
+        queue_data['queue'].insert(0, next_song_info) # Başa tekrar ekle
+
+    # Eğer kuyrukta şarkı varsa çal
+    if queue_data['queue']:
+        next_song = queue_data['queue'].pop(0) # Kuyruktan ilk şarkıyı al
+        
+        # FFmpeg kaynağını oluştur
+        source = discord.FFmpegPCMAudio(next_song['url'], **FFMPEG_OPTIONS)
+        
+        # Şarkıyı çal ve 'after' parametresiyle play_next fonksiyonunu tekrar çağır
+        # 'current_player' şarkının URL'sini ve başlığını içerir.
+        ctx.voice_client.play(source, after=lambda e: pilot.loop.call_soon_threadsafe(play_next, ctx))
+        
+        # Botun çaldığı şarkı bilgisini güncelle
+        queue_data['current_player'] = next_song
+        
+        # Kanala mesaj gönder (aynı asenkron bağlamda olmadığı için ctx.send doğrudan kullanılamaz)
+        coro = ctx.send(f"Şimdi çalıyor: **{next_song['title']}**")
+        fut = asyncio.run_coroutine_threadsafe(coro, pilot.loop)
+        try:
+            fut.result()
+        except Exception as e:
+            print(f"Mesaj gönderme hatası: {e}")
+    else:
+        # Kuyruk boşsa ve döngü kapalıysa, bot otomatik olarak ses kanalından ayrılabilir (isteğe bağlı)
+        # coro = ctx.send("Kuyruk boşaldı, ses kanalından ayrılıyorum.")
+        # asyncio.run_coroutine_threadsafe(coro, pilot.loop)
+        # coro_disconnect = ctx.voice_client.disconnect()
+        # asyncio.run_coroutine_threadsafe(coro_disconnect, pilot.loop)
+        queue_data['current_player'] = None # Çalan şarkı yok
+
+# --- Müzik Komutları ---
+
+@pilot.command()
+async def katil(ctx):
+    """Botu, komutu kullanan kişinin bulunduğu ses kanalına çağırır."""
+    if not ctx.message.author.voice:
+        await ctx.send("Önce bir ses kanalına katılmalısın!")
+        return
+    
+    channel = ctx.message.author.voice.channel
+    
+    if ctx.voice_client:
+        if ctx.voice_client.channel == channel:
+            await ctx.send("Zaten bu kanalda sesim var.")
+            return
+        await ctx.voice_client.move_to(channel)
+    else:
+        await channel.connect()
+    
+    # Sunucu için kuyruk sistemini başlat
+    if ctx.guild.id not in music_queues:
+        music_queues[ctx.guild.id] = {'queue': [], 'loop': False, 'current_player': None}
+    
+    await ctx.send(f'`{channel.name}` kanalına katıldım.')
+
+@pilot.command()
+async def ayril(ctx):
+    """Botu bulunduğu ses kanalından çıkarır."""
+    if ctx.voice_client:
+        # Kuyruğu ve döngü durumunu temizle
+        if ctx.guild.id in music_queues:
+            del music_queues[ctx.guild.id]
+        
+        await ctx.guild.voice_client.disconnect()
+        await ctx.send("Ses kanalından ayrıldım.")
+    else:
+        await ctx.send("Herhangi bir ses kanalında değilim.")
+
+@pilot.command()
+async def cal(ctx, *, search_term: str):
+    """YouTube'dan bir şarkı çalar. Kullanım: !cal <şarkı adı veya YouTube linki>
+    Eğer bot zaten çalıyor ise, şarkıyı kuyruğa ekler."""
+    if not ctx.voice_client:
+        await ctx.send("Önce bir ses kanalına katılmamı bekle (!katil).")
+        return
+
+    guild_id = ctx.guild.id
+    if guild_id not in music_queues:
+        music_queues[guild_id] = {'queue': [], 'loop': False, 'current_player': None}
+
+    await ctx.send(f"Şarkı aranıyor: **{search_term}**...")
+
+    try:
+        with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl: # 'youtube_dlp' olarak değiştirildi
+            info = ydl.extract_info(f"ytsearch:{search_term}", download=False)
+            
+            if 'entries' in info:
+                info = info['entries'][0]
+            
+            song_url = info['url']
+            song_title = info.get('title', 'Bilinmeyen Başlık')
+            
+            song_info = {'url': song_url, 'title': song_title, 'requester': ctx.author.name}
+
+            # Eğer bot şu an bir şey çalıyorsa, şarkıyı kuyruğa ekle
+            if ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
+                music_queues[guild_id]['queue'].append(song_info)
+                await ctx.send(f"**{song_title}** sıraya eklendi. Sırada {len(music_queues[guild_id]['queue'])} şarkı var.")
+            else:
+                # Bot hiçbir şey çalmıyorsa, hemen çalmaya başla
+                source = discord.FFmpegPCMAudio(song_url, **FFMPEG_OPTIONS)
+                music_queues[guild_id]['current_player'] = song_info # Çalan şarkı bilgisini kaydet
+                ctx.voice_client.play(source, after=lambda e: pilot.loop.call_soon_threadsafe(play_next, ctx))
+                await ctx.send(f"Şimdi çalıyor: **{song_title}**")
+            
+    except Exception as e:
+        await ctx.send(f"Şarkıyı bulurken veya çalarken bir hata oluştu: `{e}`")
+        print(f"Hata detayı: {e}")
+
+@pilot.command()
+async def durdur(ctx):
+    """Çalan müziği duraklatır."""
+    if ctx.voice_client and ctx.voice_client.is_playing():
+        ctx.voice_client.pause()
+        await ctx.send("Müzik durduruldu.")
+    else:
+        await ctx.send("Şu an çalan bir müzik yok.")
+
+@pilot.command()
+async def devamet(ctx):
+    """Durdurulan müziği devam ettirir."""
+    if ctx.voice_client and ctx.voice_client.is_paused():
+        ctx.voice_client.resume()
+        await ctx.send("Müziğe devam ediliyor.")
+    else:
+        await ctx.send("Müzik duraklatılmış değil.")
+
+@pilot.command()
+async def atla(ctx):
+    """Mevcut şarkıyı atlar ve sıradakini çalmaya çalışır."""
+    if ctx.voice_client and ctx.voice_client.is_playing():
+        ctx.voice_client.stop() # Bu, after=lambda... kısmını tetikler
+        await ctx.send("Şarkı atlandı.")
+    else:
+        await ctx.send("Şu an çalan bir şarkı yok.")
+
+@pilot.command()
+async def sira(ctx):
+    """Sırada bekleyen şarkıları gösterir."""
+    guild_id = ctx.guild.id
+    if guild_id not in music_queues or not music_queues[guild_id]['queue']:
+        await ctx.send("Kuyruk boş.")
+        return
+
+    queue_list = [f"{i+1}. **{song['title']}** (isteyen: {song['requester']})" 
+                  for i, song in enumerate(music_queues[guild_id]['queue'])]
+    
+    current_song_info = music_queues[guild_id]['current_player']
+    if current_song_info:
+        current_playing = f"Şu an çalıyor: **{current_song_info['title']}** (isteyen: {current_song_info['requester']})\n"
+    else:
+        current_playing = "Şu an hiçbir şey çalmıyor.\n"
+
+    # Discord'un mesaj karakter limitine dikkat etmek gerek (2000 karakter)
+    queue_message = current_playing + "\nSıradaki Şarkılar:\n" + "\n".join(queue_list)
+    
+    if len(queue_message) > 2000:
+        await ctx.send("Kuyruk çok uzun, ilk 20 şarkıyı gösteriyorum:")
+        await ctx.send(current_playing + "\nSıradaki Şarkılar:\n" + "\n".join(queue_list[:20]))
+    else:
+        await ctx.send(queue_message)
+
+@pilot.command()
+async def temizle(ctx):
+    """Kuyruktaki tüm şarkıları temizler."""
+    guild_id = ctx.guild.id
+    if guild_id in music_queues:
+        music_queues[guild_id]['queue'].clear()
+        music_queues[guild_id]['current_player'] = None # Çalan şarkıyı da temizle
+        await ctx.send("Kuyruk temizlendi.")
+    else:
+        await ctx.send("Zaten boş bir kuyruk var.")
+
+@pilot.command()
+async def dongu(ctx):
+    """Mevcut şarkının/kuyruğun döngü modunu açar/kapatır."""
+    guild_id = ctx.guild.id
+    if guild_id not in music_queues:
+        music_queues[guild_id] = {'queue': [], 'loop': False, 'current_player': None}
+
+    # Döngü modunu tersine çevir
+    music_queues[guild_id]['loop'] = not music_queues[guild_id]['loop']
+
+    if music_queues[guild_id]['loop']:
+        await ctx.send("Döngü modu **açık**. Çalan şarkı bittiğinde tekrar çalınacak.")
+    else:
+        await ctx.send("Döngü modu **kapalı**.")
+
+# --- Botu Çalıştır ---
+# ÖNEMLİ: Kendi bot token'ini buraya yapıştır!
+pilot.run("")
